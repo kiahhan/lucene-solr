@@ -21,12 +21,15 @@ import java.io.IOException;
 import java.lang.invoke.MethodHandles;
 import java.net.URL;
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.Collection;
 import java.util.Collections;
 import java.util.HashMap;
 import java.util.HashSet;
+import java.util.Iterator;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 import java.util.concurrent.atomic.AtomicInteger;
 
 import com.carrotsearch.randomizedtesting.rules.SystemPropertiesRestoreRule;
@@ -41,12 +44,17 @@ import org.apache.solr.client.solrj.impl.CloudSolrClient;
 import org.apache.solr.client.solrj.response.QueryResponse;
 import org.apache.solr.client.solrj.response.RequestStatusState;
 import org.apache.solr.common.SolrInputDocument;
+import org.apache.solr.common.SolrDocument;
 import org.apache.solr.common.cloud.ClusterState;
 import org.apache.solr.common.cloud.Replica;
 import org.apache.solr.common.cloud.Slice;
 import org.apache.solr.common.cloud.SolrZkClient;
 import org.apache.solr.common.cloud.ZkStateReader;
+import org.apache.solr.common.params.CommonParams;
+import org.apache.solr.common.params.ShardParams;
+import org.apache.solr.common.util.SimpleOrderedMap;
 import org.apache.solr.core.CoreDescriptor;
+import org.apache.solr.response.SolrQueryResponse;
 import org.apache.solr.util.RevertDefaultThreadHandlerRule;
 import org.junit.ClassRule;
 import org.junit.Rule;
@@ -449,6 +457,309 @@ public class TestMiniSolrCloudCluster extends LuceneTestCase {
     finally {
       miniCluster.shutdown();
     }
+  }
+
+  private class TestSegmentTerminateEarlyState {
+
+    final Boolean smpfEnabled = random().nextBoolean() ? null : new Boolean(random().nextBoolean());
+
+    final String keyField = "id";
+    final String timestampField = "timestamp";
+    final String oddField = "odd_l1"; // <dynamicField name="*_l1"  type="long"   indexed="true"  stored="true" multiValued="false"/>
+    final String quadField = "quad_l1"; // <dynamicField name="*_l1"  type="long"   indexed="true"  stored="true" multiValued="false"/>
+
+    final Set<Integer> minTimestampDocKeys = new HashSet<>();
+    final Set<Integer> maxTimestampDocKeys = new HashSet<>();
+
+    Integer minTimestampMM = null;
+    Integer maxTimestampMM = null;
+
+    int numDocs = 0;
+
+    private void addDocuments(CloudSolrClient cloudSolrClient,
+        int numCommits, int numDocsPerCommit, boolean optimize) throws Exception {
+      for (int cc = 1; cc <= numCommits; ++cc) {
+        for (int nn = 1; nn <= numDocsPerCommit; ++nn) {
+          ++numDocs;
+          final Integer docKey = new Integer(numDocs);
+          SolrInputDocument doc = new SolrInputDocument();
+          doc.setField(keyField, ""+docKey);
+          final int MM = random().nextInt(60);
+          if (minTimestampMM == null || MM <= minTimestampMM.intValue()) {
+            if (minTimestampMM != null && MM < minTimestampMM.intValue()) {
+              minTimestampDocKeys.clear();
+            }
+            minTimestampMM = new Integer(MM);
+            minTimestampDocKeys.add(docKey);
+          }
+          if (maxTimestampMM == null || maxTimestampMM.intValue() <= MM) {
+            if (maxTimestampMM != null && maxTimestampMM.intValue() < MM) {
+              maxTimestampDocKeys.clear();
+            }
+            maxTimestampMM = new Integer(MM);
+            maxTimestampDocKeys.add(docKey);
+          }
+          doc.setField(timestampField, "2016-01-01T00:"+MM+":00Z");
+          doc.setField(oddField, ""+(numDocs % 2));
+          doc.setField(quadField, ""+(numDocs % 4)+1);
+          cloudSolrClient.add(doc);
+        }
+        cloudSolrClient.commit();
+      }
+      if (optimize) {
+        cloudSolrClient.optimize();
+      }
+    }
+
+    private void queryTimestampDescending(CloudSolrClient cloudSolrClient) throws Exception {
+      assertFalse(maxTimestampDocKeys.isEmpty());
+      assertTrue("numDocs="+numDocs+" is not even", (numDocs%2)==0);
+      final Long oddFieldValue = new Long(maxTimestampDocKeys.iterator().next().intValue()%2);
+      final SolrQuery query = new SolrQuery(oddField+":"+oddFieldValue);
+      query.setSort(timestampField, SolrQuery.ORDER.desc);
+      query.setFields(keyField, oddField, timestampField);
+      query.setRows(1);
+      // CommonParams.SEGMENT_TERMINATE_EARLY parameter intentionally absent
+      final QueryResponse rsp = cloudSolrClient.query(query);
+      // check correctness of the results count
+      assertEquals("numFound", numDocs/2, rsp.getResults().getNumFound());
+      // check correctness of the first result
+      if (rsp.getResults().getNumFound() > 0) {
+        final SolrDocument solrDocument0 = rsp.getResults().get(0);
+        assertTrue(keyField+" of ("+solrDocument0+") is not in maxTimestampDocKeys("+maxTimestampDocKeys+")",
+            maxTimestampDocKeys.contains(solrDocument0.getFieldValue(keyField)));
+        assertEquals(oddField, oddFieldValue, solrDocument0.getFieldValue(oddField));
+      }
+      // check segmentTerminatedEarly flag
+      assertNull("responseHeader.segmentTerminatedEarly present in "+rsp.getResponseHeader(),
+          rsp.getResponseHeader().get(SolrQueryResponse.RESPONSE_HEADER_SEGMENT_TERMINATED_EARLY_KEY));
+    }
+
+    private void queryTimestampDescendingSegmentTerminateEarlyYes(CloudSolrClient cloudSolrClient) throws Exception {
+      assertFalse(maxTimestampDocKeys.isEmpty());
+      assertTrue("numDocs="+numDocs+" is not even", (numDocs%2)==0);
+      final Long oddFieldValue = new Long(maxTimestampDocKeys.iterator().next().intValue()%2);
+      final SolrQuery query = new SolrQuery(oddField+":"+oddFieldValue);
+      query.setSort(timestampField, SolrQuery.ORDER.desc);
+      query.setFields(keyField, oddField, timestampField);
+      final int rowsWanted = 1;
+      query.setRows(rowsWanted);
+      final Boolean shardsInfoWanted = (random().nextBoolean() ? null : new Boolean(random().nextBoolean()));
+      if (shardsInfoWanted != null) {
+        query.set(ShardParams.SHARDS_INFO, shardsInfoWanted.booleanValue());
+      }
+      query.set(CommonParams.SEGMENT_TERMINATE_EARLY, true);
+      final QueryResponse rsp = cloudSolrClient.query(query);
+      // check correctness of the results count
+      if (!Boolean.FALSE.equals(smpfEnabled)) {
+        assertTrue("numFound", rowsWanted <= rsp.getResults().getNumFound());
+        assertTrue("numFound", rsp.getResults().getNumFound() <= numDocs/2);
+      } else {
+        assertEquals("numFound", numDocs/2, rsp.getResults().getNumFound());
+      }
+      // check correctness of the first result
+      if (rsp.getResults().getNumFound() > 0) {
+        final SolrDocument solrDocument0 = rsp.getResults().get(0);
+        assertTrue(keyField+" of ("+solrDocument0+") is not in maxTimestampDocKeys("+maxTimestampDocKeys+")",
+            maxTimestampDocKeys.contains(solrDocument0.getFieldValue(keyField)));
+        assertEquals(oddField, oddFieldValue, rsp.getResults().get(0).getFieldValue(oddField));
+      }
+      // check segmentTerminatedEarly flag
+      assertNotNull("responseHeader.segmentTerminatedEarly missing in "+rsp.getResponseHeader(),
+          rsp.getResponseHeader().get(SolrQueryResponse.RESPONSE_HEADER_SEGMENT_TERMINATED_EARLY_KEY));
+      if (!Boolean.FALSE.equals(smpfEnabled)) {
+        assertTrue("responseHeader.segmentTerminatedEarly missing/false in "+rsp.getResponseHeader(),
+            Boolean.TRUE.equals(rsp.getResponseHeader().get(SolrQueryResponse.RESPONSE_HEADER_SEGMENT_TERMINATED_EARLY_KEY)));
+      } else {
+        assertTrue("responseHeader.segmentTerminatedEarly missing/true in "+rsp.getResponseHeader(),
+            Boolean.FALSE.equals(rsp.getResponseHeader().get(SolrQueryResponse.RESPONSE_HEADER_SEGMENT_TERMINATED_EARLY_KEY)));
+      }
+      // check shards info
+      final Object shardsInfo = rsp.getResponse().get(ShardParams.SHARDS_INFO);
+      if (!Boolean.TRUE.equals(shardsInfoWanted)) {
+        assertNull(ShardParams.SHARDS_INFO, shardsInfo);
+      } else {
+        assertNotNull(ShardParams.SHARDS_INFO, shardsInfo);
+        int segmentTerminatedEarlyShardsCount = 0;
+        for (Map.Entry<String, ?> si : (SimpleOrderedMap<?>)shardsInfo) {
+          if (Boolean.TRUE.equals(((SimpleOrderedMap)si.getValue()).get(SolrQueryResponse.RESPONSE_HEADER_SEGMENT_TERMINATED_EARLY_KEY))) {
+            segmentTerminatedEarlyShardsCount += 1;
+          }
+        }
+        // check segmentTerminatedEarly flag within shards info
+        if (!Boolean.FALSE.equals(smpfEnabled)) {
+          assertTrue(segmentTerminatedEarlyShardsCount+" shards reported "+SolrQueryResponse.RESPONSE_HEADER_SEGMENT_TERMINATED_EARLY_KEY,
+              (0<segmentTerminatedEarlyShardsCount));
+        } else {
+          assertEquals("shards reporting "+SolrQueryResponse.RESPONSE_HEADER_SEGMENT_TERMINATED_EARLY_KEY,
+              0, segmentTerminatedEarlyShardsCount);
+        }
+      }
+    }
+
+    private void queryTimestampDescendingSegmentTerminateEarlyNo(CloudSolrClient cloudSolrClient) throws Exception {
+      assertFalse(maxTimestampDocKeys.isEmpty());
+      assertTrue("numDocs="+numDocs+" is not even", (numDocs%2)==0);
+      final Long oddFieldValue = new Long(maxTimestampDocKeys.iterator().next().intValue()%2);
+      final SolrQuery query = new SolrQuery(oddField+":"+oddFieldValue);
+      query.setSort(timestampField, SolrQuery.ORDER.desc);
+      query.setFields(keyField, oddField, timestampField);
+      query.setRows(1);
+      final Boolean shardsInfoWanted = (random().nextBoolean() ? null : new Boolean(random().nextBoolean()));
+      if (shardsInfoWanted != null) {
+        query.set(ShardParams.SHARDS_INFO, shardsInfoWanted.booleanValue());
+      }
+      query.set(CommonParams.SEGMENT_TERMINATE_EARLY, false);
+      final QueryResponse rsp = cloudSolrClient.query(query);
+      // check correctness of the results count
+      assertEquals("numFound", numDocs/2, rsp.getResults().getNumFound());
+      // check correctness of the first result
+      if (rsp.getResults().getNumFound() > 0) {
+        final SolrDocument solrDocument0 = rsp.getResults().get(0);
+        assertTrue(keyField+" of ("+solrDocument0+") is not in maxTimestampDocKeys("+maxTimestampDocKeys+")",
+            maxTimestampDocKeys.contains(solrDocument0.getFieldValue(keyField)));
+        assertEquals(oddField, oddFieldValue, rsp.getResults().get(0).getFieldValue(oddField));
+      }
+      // check segmentTerminatedEarly flag
+      assertNull("responseHeader.segmentTerminatedEarly present in "+rsp.getResponseHeader(),
+          rsp.getResponseHeader().get(SolrQueryResponse.RESPONSE_HEADER_SEGMENT_TERMINATED_EARLY_KEY));
+      assertFalse("responseHeader.segmentTerminatedEarly present/true in "+rsp.getResponseHeader(),
+          Boolean.TRUE.equals(rsp.getResponseHeader().get(SolrQueryResponse.RESPONSE_HEADER_SEGMENT_TERMINATED_EARLY_KEY)));
+      // check shards info
+      final Object shardsInfo = rsp.getResponse().get(ShardParams.SHARDS_INFO);
+      if (!Boolean.TRUE.equals(shardsInfoWanted)) {
+        assertNull(ShardParams.SHARDS_INFO, shardsInfo);
+      } else {
+        assertNotNull(ShardParams.SHARDS_INFO, shardsInfo);
+        int segmentTerminatedEarlyShardsCount = 0;
+        for (Map.Entry<String, ?> si : (SimpleOrderedMap<?>)shardsInfo) {
+          if (Boolean.TRUE.equals(((SimpleOrderedMap)si.getValue()).get(SolrQueryResponse.RESPONSE_HEADER_SEGMENT_TERMINATED_EARLY_KEY))) {
+            segmentTerminatedEarlyShardsCount += 1;
+          }
+        }
+        assertEquals("shards reporting "+SolrQueryResponse.RESPONSE_HEADER_SEGMENT_TERMINATED_EARLY_KEY,
+            0, segmentTerminatedEarlyShardsCount);
+      }
+    }
+
+    private void queryTimestampDescendingSegmentTerminateEarlyYesGrouped(CloudSolrClient cloudSolrClient) throws Exception {
+      assertFalse(maxTimestampDocKeys.isEmpty());
+      assertTrue("numDocs="+numDocs+" is not even", (numDocs%2)==0);
+      final Long oddFieldValue = new Long(maxTimestampDocKeys.iterator().next().intValue()%2);
+      final SolrQuery query = new SolrQuery(oddField+":"+oddFieldValue);
+      query.setSort(timestampField, SolrQuery.ORDER.desc);
+      query.setFields(keyField, oddField, timestampField);
+      query.setRows(1);
+      query.set(CommonParams.SEGMENT_TERMINATE_EARLY, true);
+      assertTrue("numDocs="+numDocs+" is not quad-able", (numDocs%4)==0);
+      query.add("group.field", quadField);
+      query.set("group", true);
+      final QueryResponse rsp = cloudSolrClient.query(query);
+      // check correctness of the results count
+      assertEquals("matches", numDocs/2, rsp.getGroupResponse().getValues().get(0).getMatches());
+      // check correctness of the first result
+      if (rsp.getGroupResponse().getValues().get(0).getMatches() > 0) {
+        final SolrDocument solrDocument = rsp.getGroupResponse().getValues().get(0).getValues().get(0).getResult().get(0);
+        assertTrue(keyField+" of ("+solrDocument+") is not in maxTimestampDocKeys("+maxTimestampDocKeys+")",
+            maxTimestampDocKeys.contains(solrDocument.getFieldValue(keyField)));
+        assertEquals(oddField, oddFieldValue, solrDocument.getFieldValue(oddField));
+      }
+      // check segmentTerminatedEarly flag
+      // at present segmentTerminateEarly cannot be used with grouped queries
+      assertFalse("responseHeader.segmentTerminatedEarly present/true in "+rsp.getResponseHeader(),
+          Boolean.TRUE.equals(rsp.getResponseHeader().get(SolrQueryResponse.RESPONSE_HEADER_SEGMENT_TERMINATED_EARLY_KEY)));
+    }
+
+    private void queryTimestampAscendingSegmentTerminateEarlyYes(CloudSolrClient cloudSolrClient) throws Exception {
+      assertFalse(minTimestampDocKeys.isEmpty());
+      assertTrue("numDocs="+numDocs+" is not even", (numDocs%2)==0);
+      final Long oddFieldValue = new Long(minTimestampDocKeys.iterator().next().intValue()%2);
+      final SolrQuery query = new SolrQuery(oddField+":"+oddFieldValue);
+      query.setSort(timestampField, SolrQuery.ORDER.asc); // a sort order that is _not_ compatible with the merge sort order
+      query.setFields(keyField, oddField, timestampField);
+      query.setRows(1);
+      query.set(CommonParams.SEGMENT_TERMINATE_EARLY, true);
+      final QueryResponse rsp = cloudSolrClient.query(query);
+      // check correctness of the results count
+      assertEquals("numFound", numDocs/2, rsp.getResults().getNumFound());
+      // check correctness of the first result
+      if (rsp.getResults().getNumFound() > 0) {
+        final SolrDocument solrDocument0 = rsp.getResults().get(0);
+        assertTrue(keyField+" of ("+solrDocument0+") is not in minTimestampDocKeys("+minTimestampDocKeys+")",
+            minTimestampDocKeys.contains(solrDocument0.getFieldValue(keyField)));
+        assertEquals(oddField, oddFieldValue, solrDocument0.getFieldValue(oddField));
+      }
+      // check segmentTerminatedEarly flag
+      assertNotNull("responseHeader.segmentTerminatedEarly missing in "+rsp.getResponseHeader(),
+          rsp.getResponseHeader().get(SolrQueryResponse.RESPONSE_HEADER_SEGMENT_TERMINATED_EARLY_KEY));
+      // segmentTerminateEarly cannot be used with incompatible sort orders
+      assertTrue("responseHeader.segmentTerminatedEarly missing/true in "+rsp.getResponseHeader(),
+          Boolean.FALSE.equals(rsp.getResponseHeader().get(SolrQueryResponse.RESPONSE_HEADER_SEGMENT_TERMINATED_EARLY_KEY)));
+    }
+  }
+
+  @Test
+  public void testSegmentTerminateEarly() throws Exception {
+
+    final String collectionName = "testSegmentTerminateEarlyCollection";
+    final String solr_sortingMergePolicyFactory_enable = "solr.sortingMergePolicyFactory.enable";
+
+    final TestSegmentTerminateEarlyState tstes = new TestSegmentTerminateEarlyState();
+    if (tstes.smpfEnabled != null) {
+      System.setProperty(solr_sortingMergePolicyFactory_enable, tstes.smpfEnabled.toString());
+    }
+
+    File solrXml = new File(SolrTestCaseJ4.TEST_HOME(), "solr-no-core.xml");
+    Builder jettyConfig = JettyConfig.builder();
+    jettyConfig.waitForLoadingCoresToFinish(null);
+    final MiniSolrCloudCluster miniCluster = createMiniSolrCloudCluster();
+    final CloudSolrClient cloudSolrClient = miniCluster.getSolrClient();
+    cloudSolrClient.setDefaultCollection(collectionName);
+
+    try {
+      // create collection
+      {
+        final String asyncId = (random().nextBoolean() ? null : "asyncId("+collectionName+".create)="+random().nextInt());
+        final Map<String, String> collectionProperties = new HashMap<>();
+        collectionProperties.put(CoreDescriptor.CORE_CONFIG, "solrconfig-sortingmergepolicyfactory.xml");
+        createCollection(miniCluster, collectionName, null, asyncId, Boolean.TRUE, collectionProperties);
+        if (asyncId != null) {
+          final RequestStatusState state = AbstractFullDistribZkTestBase.getRequestStateAfterCompletion(asyncId, 330, cloudSolrClient);
+          assertSame("did not see async createCollection completion", RequestStatusState.COMPLETED, state);
+        }
+      }
+
+      try (SolrZkClient zkClient = new SolrZkClient
+          (miniCluster.getZkServer().getZkAddress(), AbstractZkTestCase.TIMEOUT, 45000, null);
+          ZkStateReader zkStateReader = new ZkStateReader(zkClient)) {
+        AbstractDistribZkTestBase.waitForRecoveriesToFinish(collectionName, zkStateReader, true, true, 330);
+
+        // add some documents, then optimize to get merged-sorted segments
+        tstes.addDocuments(cloudSolrClient, 10, 10, true);
+
+        // CommonParams.SEGMENT_TERMINATE_EARLY parameter intentionally absent
+        tstes.queryTimestampDescending(cloudSolrClient);
+
+        // add a few more documents, but don't optimize to have some not-merge-sorted segments
+        tstes.addDocuments(cloudSolrClient, 2, 10, false);
+
+        // CommonParams.SEGMENT_TERMINATE_EARLY parameter now present
+        tstes.queryTimestampDescendingSegmentTerminateEarlyYes(cloudSolrClient);
+        tstes.queryTimestampDescendingSegmentTerminateEarlyNo(cloudSolrClient);
+
+        // CommonParams.SEGMENT_TERMINATE_EARLY parameter present but it won't be used
+        tstes.queryTimestampDescendingSegmentTerminateEarlyYesGrouped(cloudSolrClient);
+        tstes.queryTimestampAscendingSegmentTerminateEarlyYes(cloudSolrClient); // uses a sort order that is _not_ compatible with the merge sort order
+
+        // delete the collection we created earlier
+        miniCluster.deleteCollection(collectionName);
+        AbstractDistribZkTestBase.waitForCollectionToDisappear(collectionName, zkStateReader, true, true, 330);
+      }
+    }
+    finally {
+      miniCluster.shutdown();
+    }
+    System.clearProperty(solr_sortingMergePolicyFactory_enable);
   }
 
 }
