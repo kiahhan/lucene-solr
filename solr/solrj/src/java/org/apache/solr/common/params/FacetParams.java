@@ -180,11 +180,24 @@ public interface FacetParams {
    */
   public static final String FACET_CONTAINS_IGNORE_CASE = FACET_CONTAINS + ".ignoreCase";
 
+  /**
+   * Only return constraints of a facet field excluding the given string.
+   */
+  public static final String FACET_EXCLUDETERMS = FACET + ".excludeTerms";
+
  /**
    * When faceting by enumerating the terms in a field,
    * only use the filterCache for terms with a df &gt;= to this parameter.
    */
   public static final String FACET_ENUM_CACHE_MINDF = FACET + ".enum.cache.minDf";
+  
+  /**
+   *  A boolean parameter that caps the facet counts at 1. 
+   *  With this set, a returned count will only be 0 or 1. 
+   *  For apps that don't need the count, this should be an optimization
+   */
+  public static final String FACET_EXISTS = FACET+".exists";
+  
   /**
    * Any field whose terms the user wants to enumerate over for
    * Facet Contraint Counts (multi-value)

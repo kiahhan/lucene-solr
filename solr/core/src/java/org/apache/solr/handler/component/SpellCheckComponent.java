@@ -60,7 +60,6 @@ import org.apache.solr.schema.FieldType;
 import org.apache.solr.schema.IndexSchema;
 import org.apache.solr.search.DocSet;
 import org.apache.solr.search.QParser;
-import org.apache.solr.search.QParserPlugin;
 import org.apache.solr.search.SyntaxError;
 import org.apache.solr.search.SolrIndexSearcher;
 import org.apache.solr.spelling.AbstractLuceneSpellChecker;
@@ -200,8 +199,7 @@ public class SpellCheckComponent extends SearchComponent implements SolrCoreAwar
         boolean isCorrectlySpelled = hits > (maxResultsForSuggest==null ? 0 : maxResultsForSuggest);
 
         NamedList response = new SimpleOrderedMap();
-        NamedList suggestions = toNamedList(shardRequest, spellingResult, q, extendedResults);
-        response.add("suggestions", suggestions);
+        response.add("suggestions", toNamedList(shardRequest, spellingResult, q, extendedResults));
 
         if (extendedResults) {
           response.add("correctlySpelled", isCorrectlySpelled);
@@ -242,7 +240,7 @@ public class SpellCheckComponent extends SearchComponent implements SolrCoreAwar
         try {
           if (maxResultsFilterQueryString != null) {
             // Get the default Lucene query parser
-            QParser parser = QParser.getParser(maxResultsFilterQueryString, QParserPlugin.DEFAULT_QTYPE, rb.req);              
+            QParser parser = QParser.getParser(maxResultsFilterQueryString, rb.req);
             DocSet s = searcher.getDocSet(parser.getQuery());
             maxResultsByFilters = s.size();
           } else {
@@ -301,7 +299,7 @@ public class SpellCheckComponent extends SearchComponent implements SolrCoreAwar
     //even in cases when the internal rank is the same.
     Collections.sort(collations);
 
-    NamedList collationList = new NamedList();
+    NamedList collationList = new SimpleOrderedMap();
     for (SpellCheckCollation collation : collations) {
       if (collationExtendedResults) {
         NamedList extendedResult = new SimpleOrderedMap();
@@ -425,8 +423,7 @@ public class SpellCheckComponent extends SearchComponent implements SolrCoreAwar
 
     NamedList response = new SimpleOrderedMap();
 
-    NamedList suggestions = toNamedList(false, result, origQuery, extendedResults);
-    response.add("suggestions", suggestions);
+    response.add("suggestions", toNamedList(false, result, origQuery, extendedResults));
 
     if (extendedResults) {
       response.add("correctlySpelled", isCorrectlySpelled);
@@ -437,7 +434,7 @@ public class SpellCheckComponent extends SearchComponent implements SolrCoreAwar
           .toArray(new SpellCheckCollation[mergeData.collations.size()]);
       Arrays.sort(sortedCollations);
 
-      NamedList collations = new NamedList();
+      NamedList collations = new SimpleOrderedMap();
       int i = 0;
       while (i < maxCollations && i < sortedCollations.length) {
         SpellCheckCollation collation = sortedCollations[i];
@@ -637,7 +634,7 @@ public class SpellCheckComponent extends SearchComponent implements SolrCoreAwar
 
   protected NamedList toNamedList(boolean shardRequest,
       SpellingResult spellingResult, String origQuery, boolean extendedResults) {
-    NamedList result = new NamedList();
+    NamedList result = new SimpleOrderedMap();
     Map<Token,LinkedHashMap<String,Integer>> suggestions = spellingResult
         .getSuggestions();
     boolean hasFreqInfo = spellingResult.hasTokenFrequencyInfo();
@@ -729,7 +726,7 @@ public class SpellCheckComponent extends SearchComponent implements SolrCoreAwar
 
       //ensure that there is at least one query converter defined
       if (queryConverters.size() == 0) {
-        LOG.info("No queryConverter defined, using default converter");
+        LOG.trace("No queryConverter defined, using default converter");
         queryConverters.put("queryConverter", new SpellingQueryConverter());
       }
 
@@ -862,5 +859,10 @@ public class SpellCheckComponent extends SearchComponent implements SolrCoreAwar
   @Override
   public String getDescription() {
     return "A Spell Checker component";
+  }
+
+  @Override
+  public Category getCategory() {
+    return Category.SPELLCHECKER;
   }
 }

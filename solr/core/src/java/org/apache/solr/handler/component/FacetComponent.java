@@ -33,6 +33,7 @@ import java.util.Map.Entry;
 
 import org.apache.commons.lang.ArrayUtils;
 import org.apache.commons.lang.StringUtils;
+import org.apache.lucene.util.BytesRef;
 import org.apache.lucene.util.FixedBitSet;
 import org.apache.solr.common.SolrException;
 import org.apache.solr.common.SolrException.ErrorCode;
@@ -47,7 +48,9 @@ import org.apache.solr.common.util.StrUtils;
 import org.apache.solr.request.SimpleFacets;
 import org.apache.solr.request.SolrQueryRequest;
 import org.apache.solr.schema.FieldType;
+import org.apache.solr.schema.PointField;
 import org.apache.solr.search.QueryParsing;
+import org.apache.solr.search.DocSet;
 import org.apache.solr.search.SyntaxError;
 import org.apache.solr.search.facet.FacetDebugInfo;
 import org.apache.solr.util.RTimer;
@@ -99,6 +102,11 @@ public class FacetComponent extends SearchComponent {
       // Initialize context
       FacetContext.initContext(rb);
     }
+  }
+
+  /* Custom facet components can return a custom SimpleFacets object */
+  protected SimpleFacets newSimpleFacets(SolrQueryRequest req, DocSet docSet, SolrParams params, ResponseBuilder rb) {
+    return new SimpleFacets(req, docSet, params, rb);
   }
 
   /**
@@ -251,7 +259,7 @@ public class FacetComponent extends SearchComponent {
 
     if (rb.doFacets) {
       SolrParams params = rb.req.getParams();
-      SimpleFacets f = new SimpleFacets(rb.req, rb.getResults().docSet, params, rb);
+      SimpleFacets f = newSimpleFacets(rb.req, rb.getResults().docSet, params, rb);
 
       RTimer timer = null;
       FacetDebugInfo fdebug = null;
@@ -1213,6 +1221,11 @@ public class FacetComponent extends SearchComponent {
   }
 
   @Override
+  public Category getCategory() {
+    return Category.QUERY;
+  }
+
+  @Override
   public URL[] getDocs() {
     return null;
   }
@@ -1265,7 +1278,14 @@ public class FacetComponent extends SearchComponent {
       if (facetFs != null) {
         
         for (String field : facetFs) {
-          DistribFieldFacet ff = new DistribFieldFacet(rb, field);
+          final DistribFieldFacet ff;
+          
+          if (params.getFieldBool(field, FacetParams.FACET_EXISTS, false)) {
+            // cap facet count by 1 with this method
+            ff = new DistribFacetExistsField(rb, field);
+          } else {
+            ff = new DistribFieldFacet(rb, field);
+          }
           facets.put(ff.getKey(), ff);
         }
       }
@@ -1465,11 +1485,17 @@ public class FacetComponent extends SearchComponent {
           if (sfc == null) {
             sfc = new ShardFacetCount();
             sfc.name = name;
-            sfc.indexed = ftype == null ? sfc.name : ftype.toInternal(sfc.name);
+            if (ftype == null) {
+              sfc.indexed = null;
+            } else if (ftype.isPointField()) {
+              sfc.indexed = ((PointField)ftype).toInternalByteRef(sfc.name);
+            } else {
+              sfc.indexed = new BytesRef(ftype.toInternal(sfc.name));
+            }
             sfc.termNum = termNum++;
             counts.put(name, sfc);
           }
-          sfc.count += count;
+          incCount(sfc, count);
           terms.set(sfc.termNum);
           last = count;
         }
@@ -1484,6 +1510,10 @@ public class FacetComponent extends SearchComponent {
       missingMaxPossible += last;
       missingMax[shardNum] = last;
       counted[shardNum] = terms;
+    }
+
+    protected void incCount(ShardFacetCount sfc, long count) {
+      sfc.count += count;
     }
     
     public ShardFacetCount[] getLexSorted() {
@@ -1530,14 +1560,14 @@ public class FacetComponent extends SearchComponent {
       }
     }
   }
-  
+
   /**
    * <b>This API is experimental and subject to change</b>
    */
   public static class ShardFacetCount {
     public String name;
     // the indexed form of the name... used for comparisons
-    public String indexed; 
+    public BytesRef indexed; 
     public long count;
     public int termNum; // term number starting at 0 (used in bit arrays)
     
@@ -1547,4 +1577,18 @@ public class FacetComponent extends SearchComponent {
     }
   }
 
+  
+  private static final class DistribFacetExistsField extends DistribFieldFacet {
+    private DistribFacetExistsField(ResponseBuilder rb, String facetStr) {
+      super(rb, facetStr);
+      SimpleFacets.checkMincountOnExists(field, minCount); 
+    }
+
+    @Override
+    protected void incCount(ShardFacetCount sfc, long count) {
+      if (count>0) {
+        sfc.count = 1;
+      }
+    }
+  }
 }

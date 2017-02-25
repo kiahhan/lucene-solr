@@ -23,6 +23,7 @@ import java.util.Map;
 import org.apache.lucene.document.BinaryDocValuesField; // javadocs
 import org.apache.lucene.document.NumericDocValuesField; // javadocs
 import org.apache.lucene.document.SortedDocValuesField; // javadocs
+import org.apache.lucene.document.SortedNumericDocValuesField;
 import org.apache.lucene.document.SortedSetDocValuesField; // javadocs
 import org.apache.lucene.document.StringField; // javadocs
 import org.apache.lucene.index.BinaryDocValues;
@@ -37,7 +38,7 @@ import org.apache.lucene.index.LeafReader;
 import org.apache.lucene.index.NumericDocValues;
 import org.apache.lucene.index.SortedDocValues;
 import org.apache.lucene.index.SortedSetDocValues;
-import org.apache.lucene.util.Bits;
+import org.apache.lucene.util.RamUsageEstimator;
 import org.apache.solr.uninverting.FieldCache.CacheEntry;
 
 /**
@@ -86,7 +87,7 @@ public class UninvertingReader extends FilterLeafReader {
      */
     DOUBLE_POINT,
     /** 
-     * Single-valued Integer, (e.g. indexed with {@link org.apache.lucene.document.LegacyIntField})
+     * Single-valued Integer, (e.g. indexed with {@link org.apache.lucene.legacy.LegacyIntField})
      * <p>
      * Fields with this type act as if they were indexed with
      * {@link NumericDocValuesField}.
@@ -95,7 +96,7 @@ public class UninvertingReader extends FilterLeafReader {
     @Deprecated
     LEGACY_INTEGER,
     /** 
-     * Single-valued Long, (e.g. indexed with {@link org.apache.lucene.document.LegacyLongField})
+     * Single-valued Long, (e.g. indexed with {@link org.apache.lucene.legacy.LegacyLongField})
      * <p>
      * Fields with this type act as if they were indexed with
      * {@link NumericDocValuesField}.
@@ -104,7 +105,7 @@ public class UninvertingReader extends FilterLeafReader {
     @Deprecated
     LEGACY_LONG,
     /** 
-     * Single-valued Float, (e.g. indexed with {@link org.apache.lucene.document.LegacyFloatField})
+     * Single-valued Float, (e.g. indexed with {@link org.apache.lucene.legacy.LegacyFloatField})
      * <p>
      * Fields with this type act as if they were indexed with
      * {@link NumericDocValuesField}.
@@ -113,7 +114,7 @@ public class UninvertingReader extends FilterLeafReader {
     @Deprecated
     LEGACY_FLOAT,
     /** 
-     * Single-valued Double, (e.g. indexed with {@link org.apache.lucene.document.LegacyDoubleField})
+     * Single-valued Double, (e.g. indexed with {@link org.apache.lucene.legacy.LegacyDoubleField})
      * <p>
      * Fields with this type act as if they were indexed with
      * {@link NumericDocValuesField}.
@@ -143,33 +144,61 @@ public class UninvertingReader extends FilterLeafReader {
      */
     SORTED_SET_BINARY,
     /** 
-     * Multi-valued Integer, (e.g. indexed with {@link org.apache.lucene.document.LegacyIntField})
+     * Multi-valued Integer, (e.g. indexed with {@link org.apache.lucene.legacy.LegacyIntField})
      * <p>
      * Fields with this type act as if they were indexed with
      * {@link SortedSetDocValuesField}.
      */
     SORTED_SET_INTEGER,
     /** 
-     * Multi-valued Float, (e.g. indexed with {@link org.apache.lucene.document.LegacyFloatField})
+     * Multi-valued Float, (e.g. indexed with {@link org.apache.lucene.legacy.LegacyFloatField})
      * <p>
      * Fields with this type act as if they were indexed with
      * {@link SortedSetDocValuesField}.
      */
     SORTED_SET_FLOAT,
     /** 
-     * Multi-valued Long, (e.g. indexed with {@link org.apache.lucene.document.LegacyLongField})
+     * Multi-valued Long, (e.g. indexed with {@link org.apache.lucene.legacy.LegacyLongField})
      * <p>
      * Fields with this type act as if they were indexed with
      * {@link SortedSetDocValuesField}.
      */
     SORTED_SET_LONG,
     /** 
-     * Multi-valued Double, (e.g. indexed with {@link org.apache.lucene.document.LegacyDoubleField})
+     * Multi-valued Double, (e.g. indexed with {@link org.apache.lucene.legacy.LegacyDoubleField})
      * <p>
      * Fields with this type act as if they were indexed with
      * {@link SortedSetDocValuesField}.
      */
-    SORTED_SET_DOUBLE
+    SORTED_SET_DOUBLE,
+    /** 
+     * Multi-valued Integer, (e.g. indexed with {@link org.apache.lucene.document.IntPoint})
+     * <p>
+     * Fields with this type act as if they were indexed with
+     * {@link SortedNumericDocValuesField}.
+     */
+    SORTED_INTEGER,
+    /** 
+     * Multi-valued Float, (e.g. indexed with {@link org.apache.lucene.document.FloatPoint})
+     * <p>
+     * Fields with this type act as if they were indexed with
+     * {@link SortedNumericDocValuesField}.
+     */
+    SORTED_FLOAT,
+    /** 
+     * Multi-valued Long, (e.g. indexed with {@link org.apache.lucene.document.LongPoint})
+     * <p>
+     * Fields with this type act as if they were indexed with
+     * {@link SortedNumericDocValuesField}.
+     */
+    SORTED_LONG,
+    /** 
+     * Multi-valued Double, (e.g. indexed with {@link org.apache.lucene.document.DoublePoint})
+     * <p>
+     * Fields with this type act as if they were indexed with
+     * {@link SortedNumericDocValuesField}.
+     */
+    SORTED_DOUBLE
   }
   
   /**
@@ -255,6 +284,12 @@ public class UninvertingReader extends FilterLeafReader {
             case SORTED_SET_DOUBLE:
               type = DocValuesType.SORTED_SET;
               break;
+            case SORTED_INTEGER:
+            case SORTED_FLOAT:
+            case SORTED_LONG:
+            case SORTED_DOUBLE:
+              type = DocValuesType.SORTED_NUMERIC;
+              break;
             default:
               throw new AssertionError();
           }
@@ -274,44 +309,60 @@ public class UninvertingReader extends FilterLeafReader {
 
   @Override
   public NumericDocValues getNumericDocValues(String field) throws IOException {
+    NumericDocValues values = super.getNumericDocValues(field);
+    if (values != null) {
+      return values;
+    }
     Type v = getType(field);
     if (v != null) {
       switch (v) {
-        case INTEGER_POINT: return FieldCache.DEFAULT.getNumerics(in, field, FieldCache.INT_POINT_PARSER, true);
-        case FLOAT_POINT: return FieldCache.DEFAULT.getNumerics(in, field, FieldCache.FLOAT_POINT_PARSER, true);
-        case LONG_POINT: return FieldCache.DEFAULT.getNumerics(in, field, FieldCache.LONG_POINT_PARSER, true);
-        case DOUBLE_POINT: return FieldCache.DEFAULT.getNumerics(in, field, FieldCache.DOUBLE_POINT_PARSER, true);
-        case LEGACY_INTEGER: return FieldCache.DEFAULT.getNumerics(in, field, FieldCache.LEGACY_INT_PARSER, true);
-        case LEGACY_FLOAT: return FieldCache.DEFAULT.getNumerics(in, field, FieldCache.LEGACY_FLOAT_PARSER, true);
-        case LEGACY_LONG: return FieldCache.DEFAULT.getNumerics(in, field, FieldCache.LEGACY_LONG_PARSER, true);
-        case LEGACY_DOUBLE: return FieldCache.DEFAULT.getNumerics(in, field, FieldCache.LEGACY_DOUBLE_PARSER, true);
+        case INTEGER_POINT: return FieldCache.DEFAULT.getNumerics(in, field, FieldCache.INT_POINT_PARSER);
+        case FLOAT_POINT: return FieldCache.DEFAULT.getNumerics(in, field, FieldCache.FLOAT_POINT_PARSER);
+        case LONG_POINT: return FieldCache.DEFAULT.getNumerics(in, field, FieldCache.LONG_POINT_PARSER);
+        case DOUBLE_POINT: return FieldCache.DEFAULT.getNumerics(in, field, FieldCache.DOUBLE_POINT_PARSER);
+        case LEGACY_INTEGER: return FieldCache.DEFAULT.getNumerics(in, field, FieldCache.LEGACY_INT_PARSER);
+        case LEGACY_FLOAT: return FieldCache.DEFAULT.getNumerics(in, field, FieldCache.LEGACY_FLOAT_PARSER);
+        case LEGACY_LONG: return FieldCache.DEFAULT.getNumerics(in, field, FieldCache.LEGACY_LONG_PARSER);
+        case LEGACY_DOUBLE: return FieldCache.DEFAULT.getNumerics(in, field, FieldCache.LEGACY_DOUBLE_PARSER);
       }
     }
-    return super.getNumericDocValues(field);
+    return null;
   }
 
   @Override
   public BinaryDocValues getBinaryDocValues(String field) throws IOException {
+    BinaryDocValues values = in.getBinaryDocValues(field);
+    if (values != null) {
+      return values;
+    }
     Type v = getType(field);
     if (v == Type.BINARY) {
-      return FieldCache.DEFAULT.getTerms(in, field, true);
+      return FieldCache.DEFAULT.getTerms(in, field);
     } else {
-      return in.getBinaryDocValues(field);
+      return null;
     }
   }
 
   @Override
   public SortedDocValues getSortedDocValues(String field) throws IOException {
+    SortedDocValues values = in.getSortedDocValues(field);
+    if (values != null) {
+      return values;
+    }
     Type v = getType(field);
     if (v == Type.SORTED) {
       return FieldCache.DEFAULT.getTermsIndex(in, field);
     } else {
-      return in.getSortedDocValues(field);
+      return null;
     }
   }
   
   @Override
   public SortedSetDocValues getSortedSetDocValues(String field) throws IOException {
+    SortedSetDocValues values = in.getSortedSetDocValues(field);
+    if (values != null) {
+      return values;
+    }
     Type v = getType(field);
     if (v != null) {
       switch (v) {
@@ -325,30 +376,9 @@ public class UninvertingReader extends FilterLeafReader {
           return FieldCache.DEFAULT.getDocTermOrds(in, field, null);
       }
     }
-    return in.getSortedSetDocValues(field);
+    return null;
   }
 
-  @Override
-  public Bits getDocsWithField(String field) throws IOException {
-    Type v = getType(field);
-    if (v != null) {
-      switch (v) {
-        case INTEGER_POINT:  return FieldCache.DEFAULT.getDocsWithField(in, field, FieldCache.INT_POINT_PARSER);
-        case FLOAT_POINT:    return FieldCache.DEFAULT.getDocsWithField(in, field, FieldCache.FLOAT_POINT_PARSER);
-        case LONG_POINT:     return FieldCache.DEFAULT.getDocsWithField(in, field, FieldCache.LONG_POINT_PARSER);
-        case DOUBLE_POINT:   return FieldCache.DEFAULT.getDocsWithField(in, field, FieldCache.DOUBLE_POINT_PARSER);
-        case LEGACY_INTEGER: return FieldCache.DEFAULT.getDocsWithField(in, field, FieldCache.LEGACY_INT_PARSER);
-        case LEGACY_FLOAT:   return FieldCache.DEFAULT.getDocsWithField(in, field, FieldCache.LEGACY_FLOAT_PARSER);
-        case LEGACY_LONG:    return FieldCache.DEFAULT.getDocsWithField(in, field, FieldCache.LEGACY_LONG_PARSER);
-        case LEGACY_DOUBLE:  return FieldCache.DEFAULT.getDocsWithField(in, field, FieldCache.LEGACY_DOUBLE_PARSER);
-        default:
-          return FieldCache.DEFAULT.getDocsWithField(in, field, null);
-      }
-    } else {
-      return in.getDocsWithField(field);
-    }
-  }
-  
   /** 
    * Returns the field's uninversion type, or null 
    * if the field doesn't exist or doesn't have a mapping.
@@ -380,12 +410,34 @@ public class UninvertingReader extends FilterLeafReader {
    * Return information about the backing cache
    * @lucene.internal 
    */
-  public static String[] getUninvertedStats() {
+  public static FieldCacheStats getUninvertedStats() {
     CacheEntry[] entries = FieldCache.DEFAULT.getCacheEntries();
+    long totalBytesUsed = 0;
     String[] info = new String[entries.length];
     for (int i = 0; i < entries.length; i++) {
       info[i] = entries[i].toString();
+      totalBytesUsed += entries[i].getValue().ramBytesUsed();
     }
-    return info;
+    String totalSize = RamUsageEstimator.humanReadableUnits(totalBytesUsed);
+    return new FieldCacheStats(totalSize, info);
+  }
+
+  public static int getUninvertedStatsSize() {
+    return FieldCache.DEFAULT.getCacheEntries().length;
+  }
+
+  /**
+   * Return information about the backing cache
+   * @lucene.internal
+   */
+  public static class FieldCacheStats {
+    public String totalSize;
+    public String[] info;
+
+    public FieldCacheStats(String totalSize, String[] info) {
+      this.totalSize = totalSize;
+      this.info = info;
+    }
+
   }
 }

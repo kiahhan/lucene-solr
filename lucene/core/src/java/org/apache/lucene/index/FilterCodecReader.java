@@ -17,6 +17,8 @@
 package org.apache.lucene.index;
 
 
+import java.io.IOException;
+import java.util.Collection;
 import java.util.Objects;
 
 import org.apache.lucene.codecs.DocValuesProducer;
@@ -26,6 +28,7 @@ import org.apache.lucene.codecs.PointsReader;
 import org.apache.lucene.codecs.StoredFieldsReader;
 import org.apache.lucene.codecs.TermVectorsReader;
 import org.apache.lucene.search.Sort;
+import org.apache.lucene.util.Accountable;
 import org.apache.lucene.util.Bits;
 
 /** 
@@ -88,11 +91,6 @@ public abstract class FilterCodecReader extends CodecReader {
   }
 
   @Override
-  public PointValues getPointValues() {
-    return in.getPointValues();
-  }
-
-  @Override
   public int numDocs() {
     return in.numDocs();
   }
@@ -116,4 +114,25 @@ public abstract class FilterCodecReader extends CodecReader {
   public void removeCoreClosedListener(CoreClosedListener listener) {
     in.removeCoreClosedListener(listener);
   }
+
+  @Override
+  protected void doClose() throws IOException {
+    in.doClose();
+  }
+
+  @Override
+  public long ramBytesUsed() {
+    return in.ramBytesUsed();
+  }
+
+  @Override
+  public Collection<Accountable> getChildResources() {
+    return in.getChildResources();
+  }
+
+  @Override
+  public void checkIntegrity() throws IOException {
+    in.checkIntegrity();
+  }
+
 }

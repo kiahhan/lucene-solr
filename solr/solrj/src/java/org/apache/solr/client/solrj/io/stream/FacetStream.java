@@ -201,6 +201,14 @@ public class FacetStream extends TupleStream implements Expressible  {
     init(collectionName, params, buckets, bucketSorts, metrics, limitInt, zkHost);
   }
 
+  public Bucket[] getBuckets() {
+    return this.buckets;
+  }
+
+  public String getCollection() {
+    return this.collection;
+  }
+
   private FieldComparator[] parseBucketSorts(String bucketSortString) throws IOException {
 
     String[] sorts = bucketSortString.split(",");
@@ -226,6 +234,7 @@ public class FacetStream extends TupleStream implements Expressible  {
     this.zkHost  = zkHost;
     this.params = params;
     this.buckets = buckets;
+    System.out.println("####### Bucket count:"+buckets.length);
     this.metrics = metrics;
     this.bucketSizeLimit   = bucketSizeLimit;
     this.collection = collection;

@@ -19,6 +19,7 @@ package org.apache.solr.handler;
 import java.io.IOException;
 import java.lang.invoke.MethodHandles;
 import java.net.URI;
+import java.nio.file.Paths;
 import java.text.SimpleDateFormat;
 import java.util.ArrayList;
 import java.util.Collection;
@@ -26,10 +27,10 @@ import java.util.Collections;
 import java.util.Date;
 import java.util.List;
 import java.util.Locale;
+import java.util.Objects;
 import java.util.Optional;
 import java.util.function.Consumer;
 
-import com.google.common.base.Preconditions;
 import org.apache.lucene.index.IndexCommit;
 import org.apache.lucene.store.Directory;
 import org.apache.solr.common.SolrException;
@@ -75,17 +76,17 @@ public class SnapShooter {
     } else {
       snapDirStr = core.getCoreDescriptor().getInstanceDir().resolve(location).normalize().toString();
     }
-    initialize(new LocalFileSystemRepository(), core, snapDirStr, snapshotName, null);
+    initialize(new LocalFileSystemRepository(), core, Paths.get(snapDirStr).toUri(), snapshotName, null);
   }
 
-  public SnapShooter(BackupRepository backupRepo, SolrCore core, String location, String snapshotName, String commitName) {
+  public SnapShooter(BackupRepository backupRepo, SolrCore core, URI location, String snapshotName, String commitName) {
     initialize(backupRepo, core, location, snapshotName, commitName);
   }
 
-  private void initialize(BackupRepository backupRepo, SolrCore core, String location, String snapshotName, String commitName) {
-    this.solrCore = Preconditions.checkNotNull(core);
-    this.backupRepo = Preconditions.checkNotNull(backupRepo);
-    this.baseSnapDirPath = backupRepo.createURI(Preconditions.checkNotNull(location)).normalize();
+  private void initialize(BackupRepository backupRepo, SolrCore core, URI location, String snapshotName, String commitName) {
+    this.solrCore = Objects.requireNonNull(core);
+    this.backupRepo = Objects.requireNonNull(backupRepo);
+    this.baseSnapDirPath = location;
     this.snapshotName = snapshotName;
     if (snapshotName != null) {
       directoryName = "snapshot." + snapshotName;
@@ -93,7 +94,7 @@ public class SnapShooter {
       SimpleDateFormat fmt = new SimpleDateFormat(DATE_FMT, Locale.ROOT);
       directoryName = "snapshot." + fmt.format(new Date());
     }
-    this.snapshotDirPath = backupRepo.createURI(location, directoryName);
+    this.snapshotDirPath = backupRepo.resolve(location, directoryName);
     this.commitName = commitName;
   }
 
@@ -110,7 +111,7 @@ public class SnapShooter {
   }
 
   public void validateDeleteSnapshot() {
-    Preconditions.checkNotNull(this.snapshotName);
+    Objects.requireNonNull(this.snapshotName);
 
     boolean dirFound = false;
     String[] paths;
@@ -230,7 +231,11 @@ public class SnapShooter {
       return details;
     } finally {
       if (!success) {
-        backupRepo.deleteDirectory(snapshotDirPath);
+        try {
+          backupRepo.deleteDirectory(snapshotDirPath);
+        } catch (Exception excDuringDelete) {
+          LOG.warn("Failed to delete "+snapshotDirPath+" after snapshot creation failed due to: "+excDuringDelete);
+        }
       }
     }
   }

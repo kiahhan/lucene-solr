@@ -29,6 +29,8 @@ import java.nio.ByteBuffer;
 import java.nio.channels.FileChannel;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.NoSuchFileException;
+import java.nio.file.Path;
+import java.nio.file.Paths;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collection;
@@ -300,9 +302,7 @@ public class ReplicationHandler extends RequestHandlerBase implements SolrCoreAw
         rsp.add("message","No slave configured");
       }
     } else if (command.equalsIgnoreCase(CMD_ABORT_FETCH)) {
-      IndexFetcher fetcher = currentIndexFetcher;
-      if (fetcher != null){
-        fetcher.abortFetch();
+      if (abortFetch()){
         rsp.add(STATUS, OK_STATUS);
       } else {
         rsp.add(STATUS,ERR_STATUS);
@@ -318,6 +318,16 @@ public class ReplicationHandler extends RequestHandlerBase implements SolrCoreAw
     } else if (CMD_DISABLE_REPL.equalsIgnoreCase(command)) {
       replicationEnabled.set(false);
       rsp.add(STATUS, OK_STATUS);
+    }
+  }
+
+  public boolean abortFetch() {
+    IndexFetcher fetcher = currentIndexFetcher;
+    if (fetcher != null){
+      fetcher.abortFetch();
+      return true;
+    } else {
+      return false;
     }
   }
 
@@ -435,14 +445,15 @@ public class ReplicationHandler extends RequestHandlerBase implements SolrCoreAw
       location = core.getDataDir();
     }
 
+    URI locationUri = repo.createURI(location);
+
     //If name is not provided then look for the last unnamed( the ones with the snapshot.timestamp format)
     //snapshot folder since we allow snapshots to be taken without providing a name. Pick the latest timestamp.
     if (name == null) {
-      URI basePath = repo.createURI(location);
-      String[] filePaths = repo.listAll(basePath);
+      String[] filePaths = repo.listAll(locationUri);
       List<OldBackupDirectory> dirs = new ArrayList<>();
       for (String f : filePaths) {
-        OldBackupDirectory obd = new OldBackupDirectory(basePath, f);
+        OldBackupDirectory obd = new OldBackupDirectory(locationUri, f);
         if (obd.getTimestamp().isPresent()) {
           dirs.add(obd);
         }
@@ -457,7 +468,7 @@ public class ReplicationHandler extends RequestHandlerBase implements SolrCoreAw
       name = "snapshot." + name;
     }
 
-    RestoreCore restoreCore = new RestoreCore(repo, core, location, name);
+    RestoreCore restoreCore = new RestoreCore(repo, core, locationUri, name);
     try {
       MDC.put("RestoreCore.core", core.getName());
       MDC.put("RestoreCore.backupLocation", location);
@@ -553,7 +564,8 @@ public class ReplicationHandler extends RequestHandlerBase implements SolrCoreAw
       }
 
       // small race here before the commit point is saved
-      SnapShooter snapShooter = new SnapShooter(repo, core, location, params.get(NAME), commitName);
+      URI locationUri = repo.createURI(location);
+      SnapShooter snapShooter = new SnapShooter(repo, core, locationUri, params.get(NAME), commitName);
       snapShooter.validateCreateSnapshot();
       snapShooter.createSnapAsync(indexCommit, numberToKeep, (nl) -> snapShootDetails = nl);
 
@@ -658,7 +670,8 @@ public class ReplicationHandler extends RequestHandlerBase implements SolrCoreAw
     rsp.add(CMD_GET_FILE_LIST, result);
 
     // fetch list of tlog files only if cdcr is activated
-    if (core.getUpdateHandler().getUpdateLog() != null && core.getUpdateHandler().getUpdateLog() instanceof CdcrUpdateLog) {
+    if (solrParams.getBool(TLOG_FILES, true) && core.getUpdateHandler().getUpdateLog() != null
+        && core.getUpdateHandler().getUpdateLog() instanceof CdcrUpdateLog) {
       try {
         List<Map<String, Object>> tlogfiles = getTlogFileList(commit);
         LOG.info("Adding tlog files to list: " + tlogfiles);
@@ -802,20 +815,9 @@ public class ReplicationHandler extends RequestHandlerBase implements SolrCoreAw
     numTimesReplicated++;
   }
 
-  long getIndexSize() {
-    Directory dir;
-    long size = 0;
-    try {
-      dir = core.getDirectoryFactory().get(core.getIndexDir(), DirContext.DEFAULT, core.getSolrConfig().indexConfig.lockType);
-      try {
-        size = core.getDirectoryFactory().size(dir);
-      } finally {
-        core.getDirectoryFactory().release(dir);
-      }
-    } catch (IOException e) {
-      SolrException.log(LOG, "IO error while trying to get the size of the Directory", e);
-    }
-    return size;
+  @Override
+  public Category getCategory() {
+    return Category.REPLICATION;
   }
 
   @Override
@@ -844,7 +846,7 @@ public class ReplicationHandler extends RequestHandlerBase implements SolrCoreAw
   public NamedList getStatistics() {
     NamedList list = super.getStatistics();
     if (core != null) {
-      list.add("indexSize", NumberUtils.readableSize(getIndexSize()));
+      list.add("indexSize", NumberUtils.readableSize(core.getIndexSize()));
       CommitVersionInfo vInfo = (core != null && !core.isClosed()) ? getIndexVersion(): null;
       list.add("indexVersion", null == vInfo ? 0 : vInfo.version);
       list.add(GENERATION, null == vInfo ? 0 : vInfo.generation);
@@ -896,7 +898,7 @@ public class ReplicationHandler extends RequestHandlerBase implements SolrCoreAw
     NamedList<Object> master = new SimpleOrderedMap<>();
     NamedList<Object> slave = new SimpleOrderedMap<>();
 
-    details.add("indexSize", NumberUtils.readableSize(getIndexSize()));
+    details.add("indexSize", NumberUtils.readableSize(core.getIndexSize()));
     details.add("indexPath", core.getIndexDir());
     details.add(CMD_SHOW_COMMITS, getCommits());
     details.add("isMaster", String.valueOf(isMaster));
@@ -1418,20 +1420,37 @@ public class ReplicationHandler extends RequestHandlerBase implements SolrCoreAw
       params = solrParams;
       delPolicy = core.getDeletionPolicy();
 
-      fileName = params.get(FILE);
-      cfileName = params.get(CONF_FILE_SHORT);
-      tlogFileName = params.get(TLOG_FILE);
+      fileName = validateFilenameOrError(params.get(FILE));
+      cfileName = validateFilenameOrError(params.get(CONF_FILE_SHORT));
+      tlogFileName = validateFilenameOrError(params.get(TLOG_FILE));
+      
       sOffset = params.get(OFFSET);
       sLen = params.get(LEN);
       compress = params.get(COMPRESSION);
       useChecksum = params.getBool(CHECKSUM, false);
-      indexGen = params.getLong(GENERATION, null);
+      indexGen = params.getLong(GENERATION);
       if (useChecksum) {
         checksum = new Adler32();
       }
       //No throttle if MAX_WRITE_PER_SECOND is not specified
       double maxWriteMBPerSec = params.getDouble(MAX_WRITE_PER_SECOND, Double.MAX_VALUE);
       rateLimiter = new RateLimiter.SimpleRateLimiter(maxWriteMBPerSec);
+    }
+
+    // Throw exception on directory traversal attempts 
+    protected String validateFilenameOrError(String filename) {
+      if (filename != null) {
+        Path filePath = Paths.get(filename);
+        filePath.forEach(subpath -> {
+          if ("..".equals(subpath.toString())) {
+            throw new SolrException(ErrorCode.FORBIDDEN, "File name cannot contain ..");
+          }
+        });
+        if (filePath.isAbsolute()) {
+          throw new SolrException(ErrorCode.FORBIDDEN, "File name must be relative");
+        }
+        return filename;
+      } else return null;
     }
 
     protected void initWrite() throws IOException {

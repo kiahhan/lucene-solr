@@ -61,7 +61,7 @@ public interface LeafFieldComparator {
    * 
    * @param slot the currently weakest (sorted last) slot in the queue
    */
-  void setBottom(final int slot);
+  void setBottom(final int slot) throws IOException;
 
   /**
    * Compare the bottom of the queue with this doc.  This will
@@ -114,6 +114,6 @@ public interface LeafFieldComparator {
    * 
    * @param scorer Scorer instance that you should use to
    * obtain the current hit's score, if necessary. */
-  void setScorer(Scorer scorer);
+  void setScorer(Scorer scorer) throws IOException;
 
 }

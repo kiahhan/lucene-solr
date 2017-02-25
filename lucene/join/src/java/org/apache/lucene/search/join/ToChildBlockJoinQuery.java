@@ -43,20 +43,14 @@ import org.apache.lucene.util.BitSet;
 public class ToChildBlockJoinQuery extends Query {
 
   /** Message thrown from {@link
-   *  ToChildBlockJoinScorer#validateParentDoc} on mis-use,
+   *  ToChildBlockJoinScorer#validateParentDoc} on misuse,
    *  when the parent query incorrectly returns child docs. */
-  static final String INVALID_QUERY_MESSAGE = "Parent query yields document which is not matched by parents filter, docID=";
+  static final String INVALID_QUERY_MESSAGE = "Parent query must not match any docs besides parent filter. "
+      + "Combine them as must (+) and must-not (-) clauses to find a problem doc. docID=";
   static final String ILLEGAL_ADVANCE_ON_PARENT = "Expect to be advanced on child docs only. got docID=";
 
   private final BitSetProducer parentsFilter;
   private final Query parentQuery;
-
-  // If we are rewritten, this is the original parentQuery we
-  // were passed; we use this for .equals() and
-  // .hashCode().  This makes rewritten query equal the
-  // original, so that user does not have to .rewrite() their
-  // query before searching:
-  private final Query origParentQuery;
 
   /**
    * Create a ToChildBlockJoinQuery.
@@ -66,14 +60,6 @@ public class ToChildBlockJoinQuery extends Query {
    */
   public ToChildBlockJoinQuery(Query parentQuery, BitSetProducer parentsFilter) {
     super();
-    this.origParentQuery = parentQuery;
-    this.parentQuery = parentQuery;
-    this.parentsFilter = parentsFilter;
-  }
-
-  private ToChildBlockJoinQuery(Query origParentQuery, Query parentQuery, BitSetProducer parentsFilter) {
-    super();
-    this.origParentQuery = origParentQuery;
     this.parentQuery = parentQuery;
     this.parentsFilter = parentsFilter;
   }
@@ -311,9 +297,7 @@ public class ToChildBlockJoinQuery extends Query {
   public Query rewrite(IndexReader reader) throws IOException {
     final Query parentRewrite = parentQuery.rewrite(reader);
     if (parentRewrite != parentQuery) {
-      return new ToChildBlockJoinQuery(parentQuery,
-                                parentRewrite,
-                                parentsFilter);
+      return new ToChildBlockJoinQuery(parentRewrite, parentsFilter);
     } else {
       return super.rewrite(reader);
     }
@@ -331,7 +315,7 @@ public class ToChildBlockJoinQuery extends Query {
   }
 
   private boolean equalsTo(ToChildBlockJoinQuery other) {
-    return origParentQuery.equals(other.origParentQuery) &&
+    return parentQuery.equals(other.parentQuery) &&
            parentsFilter.equals(other.parentsFilter);
   }
 
@@ -339,7 +323,7 @@ public class ToChildBlockJoinQuery extends Query {
   public int hashCode() {
     final int prime = 31;
     int hash = classHash();
-    hash = prime * hash + origParentQuery.hashCode();
+    hash = prime * hash + parentQuery.hashCode();
     hash = prime * hash + parentsFilter.hashCode();
     return hash;
   }
